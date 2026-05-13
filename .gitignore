@@ -22,3 +22,10 @@ splash.png
 splash_*.png
 usage.png
 usage_*.png
+
+# Agent context file — kept local-only, not part of the public repo
+CLAUDE.md
+
+# WIP Korean font scaffold — not applied yet (needs Pretendard-Regular.otf
+# + LVGL 9 patch + fallback wiring before it actually ships)
+tools/build_pretendard_fonts.sh
