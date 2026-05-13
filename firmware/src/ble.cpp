@@ -71,6 +71,10 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer* s, NimBLEConnInfo& info) override {
         state = BLE_STATE_CONNECTED;
         Serial.printf("BLE: connected from %s\n", info.getAddress().toString().c_str());
+        // Keep advertising so a second central (e.g. daemon writing usage data
+        // while macOS holds the HID slot) can also connect. NimBLE stops
+        // advertising on each connect — request a restart on the next tick.
+        need_advertise = true;
     }
 
     void onDisconnect(NimBLEServer* s, NimBLEConnInfo& info, int reason) override {
@@ -108,6 +112,10 @@ class ReqCallbacks : public NimBLECharacteristicCallbacks {
 void ble_init(void) {
     NimBLEDevice::init(DEVICE_NAME);
     NimBLEDevice::setSecurityAuth(true, false, true);  // bonding, no MITM, SC
+    // Request a large ATT MTU so single-packet JSON writes up to ~500B don't
+    // get sliced into prepared-write fragments (default 23 was leaving the
+    // activity payload truncated on the wire).
+    NimBLEDevice::setMTU(517);
 
     // Format MAC address
     NimBLEAddress addr = NimBLEDevice::getAddress();
@@ -166,6 +174,13 @@ void ble_tick(void) {
 }
 
 ble_state_t ble_get_state(void) {
+    // start_advertising() unconditionally sets state=ADVERTISING after
+    // every onConnect (we keep advertising for the second central — the
+    // data daemon — to attach alongside macOS HID). That left this
+    // function returning ADVERTISING even when a central was already
+    // connected, which the UI used to blank the activity label. Trust
+    // the live peer count instead.
+    if (server && server->getConnectedCount() > 0) return BLE_STATE_CONNECTED;
     return state;
 }
 

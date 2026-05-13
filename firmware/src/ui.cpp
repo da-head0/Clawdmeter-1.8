@@ -5,13 +5,15 @@
 #include "icons.h"
 #include "display_cfg.h"
 
-// Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
-LV_FONT_DECLARE(font_tiempos_56);
-LV_FONT_DECLARE(font_styrene_48);
+// Custom fonts. Sizes chosen for 368×448 — picked the smaller pre-existing
+// variants instead of regenerating, to keep the asset pipeline simple.
+LV_FONT_DECLARE(font_tiempos_34);
 LV_FONT_DECLARE(font_styrene_28);
 LV_FONT_DECLARE(font_styrene_24);
 LV_FONT_DECLARE(font_styrene_20);
-LV_FONT_DECLARE(font_mono_32);
+LV_FONT_DECLARE(font_styrene_16);
+LV_FONT_DECLARE(font_styrene_14);
+LV_FONT_DECLARE(font_mono_18);
 
 // Anthropic brand palette — design tokens live in theme.h
 #include "theme.h"
@@ -25,13 +27,13 @@ LV_FONT_DECLARE(font_mono_32);
 #define COL_RED       THEME_RED
 #define COL_BAR_BG    THEME_BAR_BG
 
-// ---- Layout constants for 480x480 (scaled for 2.16" high-DPI + rounded corners) ----
-#define SCR_W         480
-#define SCR_H         480
-#define MARGIN        20    // wider margin for rounded display corners
-#define TITLE_Y       30
-#define CONTENT_Y     100
-#define CONTENT_W     (SCR_W - 2 * MARGIN)   // 440
+// ---- Layout constants for 368×448 (1.8" AMOLED + rounded corners) ----
+#define SCR_W         368
+#define SCR_H         448
+#define MARGIN        16    // bezel inset for rounded corners
+#define TITLE_Y       24
+#define CONTENT_Y     110   // pushed down from 78 to balance with bottom activity label
+#define CONTENT_W     (SCR_W - 2 * MARGIN)   // 336
 
 // ---- Usage screen widgets ----
 static lv_obj_t* usage_container;
@@ -61,62 +63,27 @@ static lv_image_dsc_t battery_dscs[5];  // empty, low, medium, full, charging
 static lv_image_dsc_t logo_dsc;
 static screen_t current_screen = SCREEN_USAGE;
 
-// Animation state
-static uint32_t anim_last_ms = 0;
-static uint8_t anim_spinner_idx = 0;
-static uint8_t anim_phase = 0;
-static uint8_t anim_msg_idx = 0;
-static uint32_t anim_msg_start = 0;
-#define ANIM_MSG_MS     4000
+// Last UsageData snapshot — ui_tick_anim() reads it to render the activity
+// label without needing it passed in every tick.
+static const UsageData* last_data = nullptr;
+static char    last_active_form_rendered[64] = {0};
+static uint8_t last_glyph_idx_rendered      = 0xFF;
 
+// Spinner glyph cycle: ping-pong 0..5..0 over 10 phases. Turn-around frames
+// (idx 0 and 5) appear once per cycle, middle frames twice, so 0/5 visually
+// read as held longer. Mirrors the Claude Code CLI's Cavalry oscillator.
+static uint32_t anim_last_ms      = 0;
+static uint8_t  anim_spinner_idx  = 0;
+static uint8_t  anim_phase        = 0;
 static const char* const spinner_frames[] = {
     "\xC2\xB7", "\xE2\x9C\xBB", "\xE2\x9C\xBD",
     "\xE2\x9C\xB6", "\xE2\x9C\xB3", "\xE2\x9C\xA2",
 };
-#define SPINNER_COUNT 6
-#define SPINNER_PHASES (2 * (SPINNER_COUNT - 1))  // 10: ping-pong 0..5..0
-
-// Per-frame hold time. Modeled on Claude Code's spinner (Cavalry triangle
-// oscillator, range 0..5, period 5s) — turn-around frames (0 and 5) appear
-// once per cycle, middle frames twice, so 0/5 read as held longer.
+#define SPINNER_COUNT  6
+#define SPINNER_PHASES (2 * (SPINNER_COUNT - 1))
 static const uint16_t spinner_ms[SPINNER_COUNT] = {
     260, 130, 130, 130, 130, 260,
 };
-
-static const char* const anim_messages[] = {
-    "Accomplishing", "Elucidating", "Perusing",
-    "Actioning", "Enchanting", "Philosophising",
-    "Actualizing", "Envisioning", "Pondering",
-    "Baking", "Finagling", "Pontificating",
-    "Booping", "Flibbertigibbeting", "Processing",
-    "Brewing", "Forging", "Puttering",
-    "Calculating", "Forming", "Puzzling",
-    "Cerebrating", "Frolicking", "Reticulating",
-    "Channelling", "Generating", "Ruminating",
-    "Churning", "Germinating", "Scheming",
-    "Clauding", "Hatching", "Schlepping",
-    "Coalescing", "Herding", "Shimmying",
-    "Cogitating", "Honking", "Shucking",
-    "Combobulating", "Hustling", "Simmering",
-    "Computing", "Ideating", "Smooshing",
-    "Concocting", "Imagining", "Spelunking",
-    "Conjuring", "Incubating", "Spinning",
-    "Considering", "Inferring", "Stewing",
-    "Contemplating", "Jiving", "Sussing",
-    "Cooking", "Manifesting", "Synthesizing",
-    "Crafting", "Marinating", "Thinking",
-    "Creating", "Meandering", "Tinkering",
-    "Crunching", "Moseying", "Transmuting",
-    "Deciphering", "Mulling", "Unfurling",
-    "Deliberating", "Mustering", "Unravelling",
-    "Determining", "Musing", "Vibing",
-    "Discombobulating", "Noodling", "Wandering",
-    "Divining", "Percolating", "Whirring",
-    "Doing", "Wibbling",
-    "Effecting", "Wizarding",
-    "Working", "Wrangling",
-};
-#define ANIM_MSG_COUNT (sizeof(anim_messages) / sizeof(anim_messages[0]))
 
 static lv_color_t pct_color(float pct) {
     if (pct >= 80.0f) return COL_RED;
@@ -197,15 +164,15 @@ static void init_icon_dsc_rgb565a8(lv_image_dsc_t* dsc, int w, int h, const uint
 static lv_obj_t* make_pill(lv_obj_t* parent, const char* text) {
     lv_obj_t* lbl = lv_label_create(parent);
     lv_label_set_text(lbl, text);
-    lv_obj_set_style_text_font(lbl, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(lbl, &font_styrene_20, 0);
     lv_obj_set_style_text_color(lbl, COL_TEXT, 0);
     lv_obj_set_style_bg_color(lbl, COL_BAR_BG, 0);
     lv_obj_set_style_bg_opa(lbl, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(lbl, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_pad_left(lbl, 18, 0);
-    lv_obj_set_style_pad_right(lbl, 18, 0);
-    lv_obj_set_style_pad_top(lbl, 6, 0);
-    lv_obj_set_style_pad_bottom(lbl, 6, 0);
+    lv_obj_set_style_pad_left(lbl, 14, 0);
+    lv_obj_set_style_pad_right(lbl, 14, 0);
+    lv_obj_set_style_pad_top(lbl, 4, 0);
+    lv_obj_set_style_pad_bottom(lbl, 4, 0);
     return lbl;
 }
 
@@ -218,10 +185,10 @@ static void init_battery_icons(void) {
     init_icon_dsc_rgb565a8(&battery_dscs[4], ICON_BATTERY_CHARGING_W, ICON_BATTERY_CHARGING_H, icon_battery_charging_data);
 }
 
-// ======== Usage Screen (480x480) ========
+// ======== Usage Screen (368×448) ========
 
-#define PANEL_H     150
-#define PANEL_GAP   16
+#define PANEL_H     120
+#define PANEL_GAP   12
 
 // One Session/Weekly panel: big % label, pill on the right, bar, reset label.
 // Pill y=1: symmetric inside the panel — panel-outer-top → pill-top equals
@@ -233,20 +200,20 @@ static void make_usage_panel(lv_obj_t* parent, int y, const char* pill_text,
 
     *out_pct = lv_label_create(panel);
     lv_label_set_text(*out_pct, "---%");
-    lv_obj_set_style_text_font(*out_pct, &font_styrene_48, 0);
+    lv_obj_set_style_text_font(*out_pct, &font_tiempos_34, 0);
     lv_obj_set_style_text_color(*out_pct, COL_TEXT, 0);
     lv_obj_set_pos(*out_pct, 0, 0);
 
     *out_pill = make_pill(panel, pill_text);
-    lv_obj_align(*out_pill, LV_ALIGN_TOP_RIGHT, 0, 1);
+    lv_obj_align(*out_pill, LV_ALIGN_TOP_RIGHT, 0, 2);
 
-    *out_bar = make_bar(panel, 0, 56, CONTENT_W - 32, 24);
+    *out_bar = make_bar(panel, 0, 52, CONTENT_W - 32, 18);
 
     *out_reset = lv_label_create(panel);
     lv_label_set_text(*out_reset, "---");
-    lv_obj_set_style_text_font(*out_reset, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(*out_reset, &font_styrene_20, 0);
     lv_obj_set_style_text_color(*out_reset, COL_DIM, 0);
-    lv_obj_set_pos(*out_reset, 0, 94);
+    lv_obj_set_pos(*out_reset, 0, 80);
 }
 
 static void init_usage_screen(lv_obj_t* scr) {
@@ -261,9 +228,11 @@ static void init_usage_screen(lv_obj_t* scr) {
 
     lbl_title = lv_label_create(usage_container);
     lv_label_set_text(lbl_title, "Usage");
-    lv_obj_set_style_text_font(lbl_title, &font_tiempos_56, 0);
+    lv_obj_set_style_text_font(lbl_title, &font_tiempos_34, 0);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
-    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 16, TITLE_Y);
+    // Centered horizontally on the screen (no left/right bias) and vertically
+    // aligned with the logo + battery row — see HEADER_CENTER_Y.
+    lv_obj_align(lbl_title, LV_ALIGN_TOP_MID, 0, TITLE_Y);
 
     make_usage_panel(usage_container, CONTENT_Y, "Current",
                      &lbl_session_pct, &lbl_session_label,
@@ -274,9 +243,12 @@ static void init_usage_screen(lv_obj_t* scr) {
 
     lbl_anim = lv_label_create(usage_container);
     lv_label_set_text(lbl_anim, "");
-    lv_obj_set_style_text_font(lbl_anim, &font_mono_32, 0);
+    lv_obj_set_style_text_font(lbl_anim, &font_mono_18, 0);
     lv_obj_set_style_text_color(lbl_anim, COL_ACCENT, 0);
-    lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
+    lv_obj_set_style_text_align(lbl_anim, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_size(lbl_anim, CONTENT_W, 22);
+    lv_label_set_long_mode(lbl_anim, LV_LABEL_LONG_DOT);
+    lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -12);
 }
 
 // ======== Bluetooth Screen (480x480) ========
@@ -293,12 +265,12 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
     // Title
     lv_obj_t* lbl_ble_title = lv_label_create(ble_container);
     lv_label_set_text(lbl_ble_title, "Bluetooth");
-    lv_obj_set_style_text_font(lbl_ble_title, &font_tiempos_56, 0);
+    lv_obj_set_style_text_font(lbl_ble_title, &font_tiempos_34, 0);
     lv_obj_set_style_text_color(lbl_ble_title, COL_TEXT, 0);
-    lv_obj_align(lbl_ble_title, LV_ALIGN_TOP_MID, 16, TITLE_Y);
+    lv_obj_align(lbl_ble_title, LV_ALIGN_TOP_MID, 0, TITLE_Y);
 
-    // Info panel (taller for 480x480)
-    lv_obj_t* p_info = make_panel(ble_container, MARGIN, CONTENT_Y, CONTENT_W, 160);
+    // Info panel
+    lv_obj_t* p_info = make_panel(ble_container, MARGIN, CONTENT_Y, CONTENT_W, 130);
 
     // Bluetooth icon + status row
     static lv_image_dsc_t icon_bt_dsc;
@@ -310,27 +282,27 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
 
     lbl_ble_status = lv_label_create(p_info);
     lv_label_set_text(lbl_ble_status, "Initializing...");
-    lv_obj_set_style_text_font(lbl_ble_status, &font_styrene_48, 0);
+    lv_obj_set_style_text_font(lbl_ble_status, &font_styrene_28, 0);
     lv_obj_set_style_text_color(lbl_ble_status, COL_DIM, 0);
-    lv_obj_set_pos(lbl_ble_status, 56, 2);
+    lv_obj_set_pos(lbl_ble_status, 44, 2);
 
     lbl_ble_device = lv_label_create(p_info);
     lv_label_set_text(lbl_ble_device, "Device: ---");
-    lv_obj_set_style_text_font(lbl_ble_device, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(lbl_ble_device, &font_styrene_20, 0);
     lv_obj_set_style_text_color(lbl_ble_device, COL_DIM, 0);
-    lv_obj_set_pos(lbl_ble_device, 0, 64);
+    lv_obj_set_pos(lbl_ble_device, 0, 50);
 
     lbl_ble_mac = lv_label_create(p_info);
     lv_label_set_text(lbl_ble_mac, "Address: ---");
-    lv_obj_set_style_text_font(lbl_ble_mac, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(lbl_ble_mac, &font_styrene_20, 0);
     lv_obj_set_style_text_color(lbl_ble_mac, COL_DIM, 0);
-    lv_obj_set_pos(lbl_ble_mac, 0, 100);
+    lv_obj_set_pos(lbl_ble_mac, 0, 80);
 
     // Reset Bluetooth tap zone with trash icon
-    int reset_y = CONTENT_Y + 160 + 16;
+    int reset_y = CONTENT_Y + 130 + 12;
     lv_obj_t* reset_zone = lv_obj_create(ble_container);
     lv_obj_set_pos(reset_zone, MARGIN, reset_y);
-    lv_obj_set_size(reset_zone, CONTENT_W, 110);
+    lv_obj_set_size(reset_zone, CONTENT_W, 80);
     lv_obj_set_style_bg_color(reset_zone, COL_PANEL, 0);
     lv_obj_set_style_bg_opa(reset_zone, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(reset_zone, 8, 0);
@@ -348,21 +320,21 @@ static void init_bluetooth_screen(lv_obj_t* scr) {
 
     lv_obj_t* reset_lbl = lv_label_create(reset_zone);
     lv_label_set_text(reset_lbl, "Reset Bluetooth");
-    lv_obj_set_style_text_font(reset_lbl, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(reset_lbl, &font_styrene_20, 0);
     lv_obj_set_style_text_color(reset_lbl, COL_DIM, 0);
 
     // Attribution
     lv_obj_t* lbl_credit = lv_label_create(ble_container);
     lv_label_set_text(lbl_credit, "Built by @hermannbjorgvin");
-    lv_obj_set_style_text_font(lbl_credit, &font_styrene_24, 0);
+    lv_obj_set_style_text_font(lbl_credit, &font_styrene_16, 0);
     lv_obj_set_style_text_color(lbl_credit, COL_DIM, 0);
-    lv_obj_align(lbl_credit, LV_ALIGN_BOTTOM_MID, 0, -46);
+    lv_obj_align(lbl_credit, LV_ALIGN_BOTTOM_MID, 0, -32);
 
-    lv_obj_t* lbl_credit2 = lv_label_create(ble_container);
-    lv_label_set_text(lbl_credit2, "Clawd animation by @amaanbuilds");
-    lv_obj_set_style_text_font(lbl_credit2, &font_styrene_20, 0);
-    lv_obj_set_style_text_color(lbl_credit2, COL_DIM, 0);
-    lv_obj_align(lbl_credit2, LV_ALIGN_BOTTOM_MID, 0, -20);
+    // lv_obj_t* lbl_credit2 = lv_label_create(ble_container);
+    // lv_label_set_text(lbl_credit2, "Rabbit buddy by @hermannbjorgvin");
+    // lv_obj_set_style_text_font(lbl_credit2, &font_styrene_14, 0);
+    // lv_obj_set_style_text_color(lbl_credit2, COL_DIM, 0);
+    // lv_obj_align(lbl_credit2, LV_ALIGN_BOTTOM_MID, 0, -14);
 
     // Start hidden
     lv_obj_add_flag(ble_container, LV_OBJ_FLAG_HIDDEN);
@@ -392,19 +364,36 @@ void ui_init(void) {
         lv_obj_add_event_cb(splash_get_root(), global_click_cb, LV_EVENT_CLICKED, NULL);
     }
 
-    // Logo on top of all containers (inset for rounded corners)
+    // Header row: logo (left), title (center, drawn by each screen), battery
+    // (right). All three are vertically centered on the same y-line so the
+    // Usage / Bluetooth title reads as part of a single status bar.
+    //
+    // Math: Tiempos 34's optical center sits ~17 px below LV_ALIGN_TOP_MID's
+    // anchor (= TITLE_Y), so the row mid line is TITLE_Y + 17 = 41 px. Logos
+    // and icons are anchored from the TOP, so subtract half their displayed
+    // height to land their middle on the same line.
+    const int HEADER_MID = TITLE_Y + 17;
+
+    // Logo on top of all containers (inset for rounded corners). 80×80 source
+    // drawn at scale=128 (0.5×) → 40×40 visible.
     logo_img = lv_image_create(scr);
     lv_image_set_src(logo_img, &logo_dsc);
-    lv_obj_set_pos(logo_img, MARGIN, TITLE_Y - 10);
+    lv_image_set_antialias(logo_img, true);
+    lv_image_set_scale(logo_img, 128);
+    lv_image_set_pivot(logo_img, 0, 0);
+    lv_obj_set_pos(logo_img, MARGIN, HEADER_MID - 20);
 
-    // Battery indicator on top of all containers (upper-right, inset)
+    // Battery indicator on top of all containers (upper-right, inset). The
+    // 48×48 icon needs to fit inside the right bezel (MARGIN), so its top-
+    // left x is SCR_W − 48 − MARGIN.
     battery_img = lv_image_create(scr);
     lv_image_set_src(battery_img, &battery_dscs[0]);
-    lv_obj_set_pos(battery_img, SCR_W - 48 - MARGIN, TITLE_Y);
+    lv_obj_set_pos(battery_img, SCR_W - ICON_BATTERY_W - MARGIN, HEADER_MID - ICON_BATTERY_H / 2);
 }
 
 void ui_update(const UsageData* data) {
     if (!data->valid) return;
+    last_data = data;
 
     int s_pct = (int)(data->session_pct + 0.5f);
 
@@ -427,25 +416,43 @@ void ui_update(const UsageData* data) {
 }
 
 void ui_tick_anim(void) {
-    if (current_screen != SCREEN_USAGE) return;
+    if (current_screen != SCREEN_USAGE || !lbl_anim) return;
 
-    uint32_t now = lv_tick_get();
+    // Spinner is active only when daemon has an in-progress task (active_form
+    // empty otherwise) AND a central is connected. Blank label otherwise —
+    // no idle spinning, no stale text after disconnect.
+    bool show = last_data && last_data->valid
+                && last_data->active_form[0] != '\0'
+                && ble_get_state() == BLE_STATE_CONNECTED;
 
-    if (now - anim_msg_start >= ANIM_MSG_MS) {
-        anim_msg_idx = (anim_msg_idx + 1) % ANIM_MSG_COUNT;
-        anim_msg_start = now;
+    if (!show) {
+        if (last_active_form_rendered[0] != '\0') {
+            last_active_form_rendered[0] = '\0';
+            last_glyph_idx_rendered = 0xFF;
+            lv_label_set_text(lbl_anim, "");
+        }
+        return;
     }
 
+    // Advance the spinner phase on its own timing.
+    uint32_t now = lv_tick_get();
     if (now - anim_last_ms >= spinner_ms[anim_spinner_idx]) {
         anim_last_ms = now;
         anim_phase = (anim_phase + 1) % SPINNER_PHASES;
         anim_spinner_idx = (anim_phase < SPINNER_COUNT) ? anim_phase
                                                         : (SPINNER_PHASES - anim_phase);
+    }
 
-        static char buf[80];
+    // Re-render only when glyph or activeForm changed.
+    if (anim_spinner_idx != last_glyph_idx_rendered ||
+        strcmp(last_data->active_form, last_active_form_rendered) != 0) {
+        last_glyph_idx_rendered = anim_spinner_idx;
+        strlcpy(last_active_form_rendered, last_data->active_form,
+                sizeof(last_active_form_rendered));
+        char buf[96];
         snprintf(buf, sizeof(buf), "%s %s\xE2\x80\xA6",
                  spinner_frames[anim_spinner_idx],
-                 anim_messages[anim_msg_idx]);
+                 last_data->active_form);
         lv_label_set_text(lbl_anim, buf);
     }
 }

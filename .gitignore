@@ -11,3 +11,14 @@ firmware/.vscode/
 # Node tooling deps (npm install --no-save)
 tools/node_modules/
 tools/package-lock.json
+
+# Python bytecode cache (daemon)
+daemon/__pycache__/
+*.pyc
+
+# Test/QA screenshots (regenerated on demand via screenshot.sh)
+out.png
+splash.png
+splash_*.png
+usage.png
+usage_*.png

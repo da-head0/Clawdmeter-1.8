@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Launch agent template: keep claude_usage_daemon.py running across logins.
+
+  Setup:
+    1. Copy this file to ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist
+    2. Edit the two ProgramArguments paths below — replace YOUR_USERNAME and the
+       repo path with your own (find the python with `which python3`).
+    3. Load it:
+         launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist
+    4. Tail the log to verify:
+         tail -f /tmp/claude-usage-daemon.log
+
+  Unload (stop autorun):
+         launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.claude-usage-daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/YOUR_USERNAME/Code/Clawdmeter-1.8/daemon/claude_usage_daemon.py</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/claude-usage-daemon.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/claude-usage-daemon.log</string>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>

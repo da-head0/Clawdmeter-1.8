@@ -2,27 +2,28 @@
 #include <stdint.h>
 #include <lvgl.h>
 
-// Initialize splash module. Creates the canvas widget inside `parent` and
-// allocates the 480x480 pixel buffer (PSRAM).
+struct UsageData;
+
+// Initialize splash — creates an LVGL canvas widget inside `parent`,
+// allocates the buddy's 184×224 RGB565 framebuffer, and sets up the
+// rabbit animation engine (200ms tick).
 void splash_init(lv_obj_t *parent);
 
-// Advance animation frame if hold time elapsed. Call from main loop.
+// Advance the buddy's animation. Call from main loop.
 void splash_tick(void);
 
-// Cycle to the next animation in the catalog.
+// QA-only: cycle through persona states (sleep → idle → busy → …).
+// Wired to the legacy "next animation" button on 2.16"; on 1.8" the
+// only button is reserved for Space / cycle-screen, so this is unused
+// in production but exposed for debug.
 void splash_next(void);
 
-// Show/hide the splash container.
 void splash_show(void);
 void splash_hide(void);
 
-// Pick the next animation matching the current usage-rate group.
-// Called automatically by splash_show(); also exposed so other modules can
-// trigger a re-pick when the rate group changes mid-display.
-void splash_pick_for_current_rate(void);
+// Notify splash that fresh usage data arrived (5h_pct + 7d_pct + status).
+// Splash uses this to update the persona state and detect window resets.
+void splash_on_usage_update(const UsageData* data);
 
-// True when splash is currently rendering (used to gate re-picks).
 bool splash_is_active(void);
-
-// Root container (so ui.cpp can attach a click event).
 lv_obj_t* splash_get_root(void);
