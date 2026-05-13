@@ -1,6 +1,37 @@
 # Clawdmeter — 1.8" macOS fork
 
-A small ESP32 desk dashboard that watches your Claude Code usage. Fork of [Clawdmeter](https://github.com/hermannbjorgvin/Clawdmeter) (2.16" panel, Linux) retargeted to the **[Waveshare ESP32-S3-Touch-AMOLED-1.8](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-1.8)** (368×448) with a macOS-native Python daemon that reads the Claude Code OAuth token straight from the macOS Keychain. The splash is a Tamagotchi-style ASCII rabbit ported from [claude-desktop-buddy](https://github.com/hermannbjorgvin/claude-desktop-buddy-esp32-s3-touch-amoled-1.8); the single side button sends Space over BLE HID for Claude Code's voice-mode shortcut.
+> **macOS only.** The host daemon reads the Claude Code OAuth token from the macOS Keychain via `security find-generic-password`. A Linux/Windows host would need a different token source — porting it is out of scope for this fork.
+
+A small ESP32 desk dashboard that watches your Claude Code usage. Fork of [Clawdmeter](https://github.com/hermannbjorgvin/Clawdmeter) (2.16" panel, Linux) retargeted to the **[Waveshare ESP32-S3-Touch-AMOLED-1.8](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-1.8)** (368×448). The splash is a Tamagotchi-style ASCII rabbit ported from [claude-desktop-buddy](https://github.com/hermannbjorgvin/claude-desktop-buddy-esp32-s3-touch-amoled-1.8); the single side button sends Space over BLE HID for use as a system-wide keyboard shortcut.
+
+## What you see
+
+<table>
+<tr>
+<td width="50%" align="center"><b>Splash</b></td>
+<td width="50%" align="center"><b>Usage</b></td>
+</tr>
+<tr>
+<td><img src="screenshots/splash.png" alt="Splash screen with ASCII rabbit and active session info" /></td>
+<td><img src="screenshots/usage.png" alt="Usage screen with 5h and 7d utilization bars" /></td>
+</tr>
+<tr>
+<td>
+
+- ASCII rabbit whose pose reflects current usage band (sleep / idle / busy / heart / celebrate / dizzy).
+- **Session name** of the busy Claude Code session.
+- **Two task lines** — `*` for in-progress, `v` for completed (subjects of the latest tracked tasks).
+
+</td>
+<td>
+
+- **Current** — 5-hour utilization % + reset countdown.
+- **Weekly** — 7-day utilization % + reset countdown.
+- **Bottom spinner** — `activeForm` of the latest in-progress task while CC is busy. Falls back to `Working` if CC is busy without tracked tasks. Blank when idle.
+
+</td>
+</tr>
+</table>
 
 ## Hardware
 
@@ -10,14 +41,25 @@ The firmware uses Arduino framework 3.x via the [pioarduino](https://github.com/
 
 ## Build & flash
 
+Plug the board in over USB-C, then find which `/dev/tty.usbmodem*` macOS assigned to it:
+
 ```bash
-pio run -d firmware -t upload --upload-port /dev/tty.usbmodemXXXX
+ls /dev/tty.usbmodem*
+# /dev/tty.usbmodem1101   ← copy this whole path
 ```
 
-USB JTAG — no boot-mode switch needed. Screenshot the live framebuffer:
+Then build and upload (replace the path with what you saw above):
 
 ```bash
-./screenshot.sh out.png /dev/tty.usbmodemXXXX
+pio run -d firmware -t upload --upload-port /dev/tty.usbmodem1101
+```
+
+USB JTAG — no boot-mode switch needed.
+
+Screenshot the live framebuffer (same port):
+
+```bash
+./screenshot.sh out.png /dev/tty.usbmodem1101
 ```
 
 ## Controls
@@ -26,11 +68,11 @@ The 1.8" board has one user button (**KEY1**, GPIO 0) plus the touchscreen.
 
 | Action | Result |
 |---|---|
-| Short tap KEY1 (<700 ms) | Send HID Space — Claude Code voice mode toggle |
+| Short tap KEY1 (<700 ms) | Send a single HID Space keypress to the paired host |
 | Long press KEY1 (≥700 ms) | Cycle screens: Splash → Usage → Bluetooth → Splash |
 | Tap the splash | Flip to last non-splash screen (tap again to dismiss) |
 
-The board boots into the splash and stays there until you long-press.
+The board pairs as a generic BLE keyboard, so the Space key goes wherever your cursor has focus. You can bind it inside whichever app you want as a shortcut.
 
 ## Rabbit persona
 
@@ -82,47 +124,7 @@ Unload: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.user.claude-u
 | `Device not found, retry in …` | `rm ~/Library/Application\ Support/claude-usage-monitor/ble-address` to force a rescan. |
 | `Claude Code OAuth token not found` | Run `claude /login`. If you previously clicked Deny on the Keychain prompt, open Keychain Access, find `Claude Code-credentials`, **Access Control** tab, add `/usr/bin/python3`. |
 | Rabbit stuck on `sleep` while coding | Daemon sees no `status:busy` session. CC marks a session busy only while a turn is in flight. |
-| Korean session names show as `?` | Pretendard fallback fonts not built yet — see [Korean text](#korean-text). |
 | `JSON parse error` after `git pull` | Daemon and firmware payload format diverged — rebuild and reflash. |
-
-## Korean text
-
-The daemon ships Hangul straight through to the firmware, but the bundled Styrene fonts only cover ASCII, so until you build the Pretendard fallback Hangul renders as boxes/`?`.
-
-```bash
-# 1. Drop Pretendard-Regular.otf into assets/
-#    (https://github.com/orioncactus/pretendard/releases)
-# 2. Generate fallback fonts:
-./tools/build_pretendard_fonts.sh
-# 3. Apply LVGL 9 patches (see "Recompiling fonts") to both outputs.
-# 4. In firmware/src/font_styrene_{16,20}.c, add
-#       extern const lv_font_t font_pretendard_{16,20};
-#    near the top and change `.fallback = NULL` inside the matching
-#    font struct to `.fallback = &font_pretendard_{16,20}`.
-# 5. Rebuild and flash.
-```
-
-The script targets the full Hangul Syllables block + ASCII + CJK punctuation at bpp=2 — ~200–250 KB flash for both sizes combined.
-
-## BLE protocol
-
-| | UUID |
-|---|---|
-| **Data Service** | `4c41555a-4465-7669-6365-000000000001` |
-| RX (write) | `…0002` |
-| TX (notify) | `…0003` |
-| REQ (notify, fresh-data ping) | `…0004` |
-| **HID Service** | `00001812-0000-1000-8000-00805f9b34fb` |
-
-JSON payload on RX:
-
-```json
-{ "s": 45, "sr": 120, "w": 28, "wr": 7200, "st": "allowed", "ok": true,
-  "idle": false, "sn": "splash-repair", "t1": "* Phase 2", "t2": "v Phase 1",
-  "ta": "Refactoring the persona state machine" }
-```
-
-`s`/`w` are 5h/7d util %, `sr`/`wr` minutes until reset, `st` is `allowed` or `limited`, `idle` flags no-busy-session (daemon blanks `sn`/`t1`/`t2`/`ta` in that case), `sn` is the session slug, `t1`/`t2` are in-progress task lines (`*` / `v` / space glyph + subject), `ta` is the spinner activeForm.
 
 ## Recompiling fonts
 
@@ -135,9 +137,6 @@ for size in 14 16 20 24 28; do
     --size $size --format lvgl --bpp 4 --no-compress \
     -o firmware/src/font_styrene_${size}.c --lv-include "lvgl.h"
 done
-
-# Pretendard fallback (Hangul + ASCII)
-./tools/build_pretendard_fonts.sh
 ```
 
 `lv_font_conv` v1.5.3 emits LVGL 8 format. Patch each generated `.c`:

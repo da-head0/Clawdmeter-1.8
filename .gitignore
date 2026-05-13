@@ -16,12 +16,13 @@ tools/package-lock.json
 daemon/__pycache__/
 *.pyc
 
-# Test/QA screenshots (regenerated on demand via screenshot.sh)
-out.png
-splash.png
-splash_*.png
-usage.png
-usage_*.png
+# Test/QA screenshots in repo root (regenerated on demand via screenshot.sh)
+# Note: leading slash anchors to repo root so screenshots/ stays tracked.
+/out.png
+/splash.png
+/splash_*.png
+/usage.png
+/usage_*.png
 
 # Agent context file — kept local-only, not part of the public repo
 CLAUDE.md
