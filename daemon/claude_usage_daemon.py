@@ -13,9 +13,18 @@ Polling strategy
   300s otherwise. Stops entirely when no Claude Code session is "busy"
   (to avoid spending tokens just to observe self), and trivially also
   stops while BLE is disconnected (the loop is gated on is_connected).
-- Local files (~/.claude/sessions, ~/.claude/tasks): scanned every 2s
-  while a busy session exists, 10s otherwise. Cheap file IO, payload is
-  only written to BLE when its bytes actually change.
+- Local files (~/.claude/sessions, ~/.claude/tasks, and the per-session
+  projects/<slug>/<id>/subagents directory): scanned every 2s while a
+  busy session exists, 10s otherwise. Cheap file IO, payload is only
+  written to BLE when its bytes actually change.
+
+Splash bottom rows
+------------------
+The two task rows (t1/t2) show the running sub-agent fleet when any
+sub-agent is active, falling back to the session's in-progress todos
+otherwise. Claude Code keeps no running/finished flag on disk, so
+"active" is inferred from the agent transcript's mtime freshness — this
+tracks the CLI's FleetView closely for a glanceable desk display.
 
 Install:
     pip3 install bleak
@@ -61,6 +70,16 @@ CACHE_FILE = CACHE_DIR / "ble-address"
 CLAUDE_DIR    = Path.home() / ".claude"
 SESSIONS_DIR  = CLAUDE_DIR / "sessions"
 TASKS_DIR     = CLAUDE_DIR / "tasks"
+PROJECTS_DIR  = CLAUDE_DIR / "projects"
+
+# A sub-agent counts as "active" if its transcript .jsonl was written
+# within this window. There is no running/finished flag on disk, so
+# freshness is the only cheap signal. Generous on purpose: an agent
+# stuck in one long tool call (a build, a big grep) stays quiet for a
+# while, and we don't want it flickering off the splash mid-run. The
+# flip side — a genuinely finished agent lingers up to this long before
+# dropping off. Tune here if that balance feels wrong.
+AGENT_FRESH_S = 180
 
 # Task-status glyphs. ASCII so the firmware can switch the splash task lines
 # to the Anthropic Styrene font (which lacks dingbat coverage) without
@@ -247,6 +266,55 @@ def read_recent_tasks(session_id: str | None, limit: int = 2) -> list[dict]:
     return recent
 
 
+def find_subagents_dir(session_id: str | None) -> Path | None:
+    """Locate ~/.claude/projects/<slug>/<sessionId>/subagents.
+
+    Claude Code derives <slug> from the session cwd with its own
+    path-mangling rules; rather than re-implement (and risk drifting
+    from) that, glob over the project dirs and match the sessionId UUID,
+    which is globally unique. ~16 dirs, one stat each — trivially cheap."""
+    if not session_id or not PROJECTS_DIR.exists():
+        return None
+    for proj in PROJECTS_DIR.iterdir():
+        if not proj.is_dir():
+            continue
+        d = proj / session_id / "subagents"
+        if d.is_dir():
+            return d
+    return None
+
+
+def read_active_agents(session_id: str | None, now: float,
+                       limit: int = 2) -> list[str]:
+    """Display names of sub-agents whose transcript was touched within
+    AGENT_FRESH_S, ordered freshest LAST.
+
+    The last-element-is-freshest ordering mirrors read_recent_tasks: the
+    splash assigns t1=oldest (dim row) and t2=newest (accent row), so the
+    most recently active agent lands on the highlighted bottom row."""
+    d = find_subagents_dir(session_id)
+    if not d:
+        return []
+    found: list[tuple[float, str]] = []
+    for meta in d.glob("agent-*.meta.json"):
+        stem = meta.name[: -len(".meta.json")]
+        try:
+            mtime = (d / f"{stem}.jsonl").stat().st_mtime
+        except OSError:
+            continue
+        if now - mtime > AGENT_FRESH_S:
+            continue
+        data = _load_json(meta) or {}
+        name = (data.get("name") or data.get("agentType") or "").strip()
+        if not name:
+            continue
+        found.append((mtime, name))
+    found.sort(key=lambda x: x[0], reverse=True)  # freshest first
+    recent = found[:limit]
+    recent.sort(key=lambda x: x[0])                # freshest last
+    return [name for _, name in recent]
+
+
 def sanitize_for_display(s: str) -> str:
     """Allowed character classes the firmware can render: ASCII printable,
     Hangul syllables (U+AC00..U+D7A3), CJK punctuation, fullwidth ASCII,
@@ -277,6 +345,13 @@ def format_task_line(task: dict) -> str:
     return f"{glyph} {subj}"
 
 
+def format_agent_line(name: str) -> str:
+    # An active agent is, by definition, in progress — reuse the
+    # in_progress glyph so the fleet rows read consistently with the
+    # task rows the firmware already knows how to render.
+    return f"{STATUS_GLYPH['in_progress']} {sanitize_for_display(name)}"
+
+
 def current_active_form(tasks: list[dict]) -> str:
     """activeForm of the most recently started in-progress task (highest ID).
     That matches the visual bottom row of the splash task list, so the
@@ -293,7 +368,7 @@ def current_active_form(tasks: list[dict]) -> str:
 # ---------------------------------------------------------------- payload
 
 def build_payload(rate: dict, session_name: str, tasks: list[dict],
-                  is_busy: bool) -> bytes:
+                  agents: list[str], is_busy: bool) -> bytes:
     p = dict(rate)
     # `idle` is the splash/rabbit sleep gate. find_active_session() falls back
     # to the most recently updated session even when none is busy, so without
@@ -303,14 +378,25 @@ def build_payload(rate: dict, session_name: str, tasks: list[dict],
     # When no busy session, blank everything so the splash goes properly quiet
     # (sleeping rabbit, no stale label below).
     p["sn"] = sanitize_for_display(session_name) if is_busy else ""
-    p["t1"] = format_task_line(tasks[0]) if (is_busy and len(tasks) >= 1) else ""
-    p["t2"] = format_task_line(tasks[1]) if (is_busy and len(tasks) >= 2) else ""
-    # Usage spinner: prefer the latest in-progress task's activeForm. If CC
-    # is busy but has no tracked tasks (transient turns, single tool bursts),
-    # fall back to a generic "Working" so the device still shows liveness —
-    # CC's own CLI spinner phrases ("Spelunking…", etc.) are ephemeral and
-    # never hit disk, so the daemon can't mirror them verbatim.
+    # Fleet beats todos: if any sub-agent is running, the two rows are
+    # "what my agents are doing" — that's the more useful glance than a
+    # stale todo list while work is delegated out. Falls back to the
+    # in-progress task lines when no agent is active.
+    if is_busy and agents:
+        p["t1"] = format_agent_line(agents[0]) if len(agents) >= 1 else ""
+        p["t2"] = format_agent_line(agents[1]) if len(agents) >= 2 else ""
+    else:
+        p["t1"] = format_task_line(tasks[0]) if (is_busy and len(tasks) >= 1) else ""
+        p["t2"] = format_task_line(tasks[1]) if (is_busy and len(tasks) >= 2) else ""
+    # Usage spinner: prefer the latest in-progress task's activeForm; then
+    # the freshest running agent's name (so it isn't a bare "Working"
+    # while agents are clearly busy); then a generic "Working" so the
+    # device still shows liveness. CC's own CLI spinner phrases
+    # ("Spelunking…", etc.) are ephemeral and never hit disk, so the
+    # daemon can't mirror them verbatim.
     active = current_active_form(tasks) if is_busy else ""
+    if is_busy and not active and agents:
+        active = sanitize_for_display(agents[-1])
     if is_busy and not active:
         active = "Working"
     p["ta"] = active
@@ -387,6 +473,7 @@ async def session(addr: str) -> None:
             # Local snapshot: cheap, always.
             session_id, session_name, busy_now = find_active_session()
             tasks = read_recent_tasks(session_id)
+            agents = read_active_agents(session_id, now)
             is_busy = busy_now
 
             # API poll: only when busy and interval elapsed (or refresh asked).
@@ -407,7 +494,7 @@ async def session(addr: str) -> None:
                     log(f"Poll error: {e}")
 
             # Build + write only on change.
-            payload = build_payload(rate, session_name, tasks, busy_now)
+            payload = build_payload(rate, session_name, tasks, agents, busy_now)
             if payload != last_payload or first_send:
                 try:
                     await client.write_gatt_char(RX_CHAR_UUID, payload, response=True)
