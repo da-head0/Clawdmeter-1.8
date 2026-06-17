@@ -128,18 +128,31 @@ def _read_keychain_blob() -> str | None:
     return result.stdout.strip() or None
 
 
+def _extract_token(data) -> str | None:
+    """Prefer the Claude Code OAuth token explicitly. The Keychain item also
+    holds mcpOAuth tokens (atlassian/figma, etc.) once MCP integrations are
+    connected; a blind walk would return whichever accessToken comes first in
+    dict order — often an MCP token — and send it to api.anthropic.com, which
+    401s and yields no rate-limit headers. Pin to claudeAiOauth first."""
+    if isinstance(data, dict):
+        claude = data.get("claudeAiOauth")
+        if isinstance(claude, dict) and isinstance(claude.get("accessToken"), str):
+            return claude["accessToken"]
+    return _walk_for_token(data)
+
+
 def read_token() -> str:
     blob = _read_keychain_blob()
     if blob:
         try:
-            tok = _walk_for_token(json.loads(blob))
+            tok = _extract_token(json.loads(blob))
             if tok:
                 return tok
         except json.JSONDecodeError:
             pass
 
     if TOKEN_PATH.exists():
-        tok = _walk_for_token(json.loads(TOKEN_PATH.read_text()))
+        tok = _extract_token(json.loads(TOKEN_PATH.read_text()))
         if tok:
             return tok
 
