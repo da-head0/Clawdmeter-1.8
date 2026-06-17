@@ -111,8 +111,14 @@ cp daemon/com.user.claude-usage-daemon.plist.example \
    ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist
 # Edit the two ProgramArguments paths inside that plist (replace
 # YOUR_USERNAME and the repo path; `which python3` finds the interpreter).
+# NOTE: the template ships /usr/bin/python3, but `bleak` is usually installed
+# under Homebrew — if `which python3` shows /opt/homebrew/bin/python3, use that
+# path, or launchd starts a python without bleak and the agent crash-loops.
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist
 tail -f /tmp/claude-usage-daemon.log
+
+# Already running and you pulled a fix? Restart in place:
+launchctl kickstart -k gui/$(id -u)/com.user.claude-usage-daemon
 ```
 
 Unload: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist`.
@@ -123,6 +129,7 @@ Unload: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.user.claude-u
 |---|---|
 | `Device not found, retry in …` | `rm ~/Library/Application\ Support/claude-usage-monitor/ble-address` to force a rescan. |
 | `Claude Code OAuth token not found` | Run `claude /login`. If you previously clicked Deny on the Keychain prompt, open Keychain Access, find `Claude Code-credentials`, **Access Control** tab, add `/usr/bin/python3`. |
+| Connected + `Sent:` but usage stuck at `s:0` / `st:"unknown"` | The daemon picked the wrong token. The `Claude Code-credentials` Keychain item also stores `mcpOAuth` tokens (Atlassian/Figma, etc.) once you connect MCP integrations; older builds grabbed the first `accessToken` found and sent an MCP token to Anthropic (401 → no rate-limit headers). Fixed by pinning to `claudeAiOauth.accessToken` — `git pull` and restart the daemon. |
 | Rabbit stuck on `sleep` while coding | Daemon sees no `status:busy` session. CC marks a session busy only while a turn is in flight. |
 | `JSON parse error` after `git pull` | Daemon and firmware payload format diverged — rebuild and reflash. |
 
